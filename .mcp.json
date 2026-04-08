@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "research": {
+      "command": "python",
+      "args": ["-m", "mcp_research"],
+      "env": {
+        "OLLAMA_URL": "http://localhost:11434"
+      }
+    }
+  }
+}
