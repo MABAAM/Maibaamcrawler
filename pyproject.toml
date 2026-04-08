@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/MABAAM/Maibaamcrawler"
+Homepage = "https://maibaam.com"
 Repository = "https://github.com/MABAAM/Maibaamcrawler"
 Issues = "https://github.com/MABAAM/Maibaamcrawler/issues"
 
