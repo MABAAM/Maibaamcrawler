@@ -11,6 +11,20 @@ from . import config
 logger = logging.getLogger(__name__)
 
 
+def _get_ddgs_class():
+    """Resolve DuckDuckGo search class from either package name."""
+    try:
+        from ddgs import DDGS
+        return DDGS
+    except ImportError:
+        pass
+    try:
+        from duckduckgo_search import DDGS
+        return DDGS
+    except ImportError:
+        return None
+
+
 def web_search(query: str, max_results: int = 5) -> tuple[list[dict], str | None]:
     """Run the 3-tier search cascade. Returns (results, hint_or_none)."""
     query = str(query).strip()
@@ -23,12 +37,10 @@ def web_search(query: str, max_results: int = 5) -> tuple[list[dict], str | None
         return brave_results, None
 
     # Tier 2: DuckDuckGo DDGS library (retry once)
+    DDGS = _get_ddgs_class()
+    if DDGS is None:
+        return _search_fallback(query, max_results)
     try:
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
-
         last_err = None
         for attempt in range(2):
             try:
@@ -54,7 +66,7 @@ def web_search(query: str, max_results: int = 5) -> tuple[list[dict], str | None
             logger.warning(f"DDGS failed after retry: {last_err}")
             return _search_fallback(query, max_results)
         return [], brave_hint or "DuckDuckGo returned 0 results — try a different query."
-    except ImportError:
+    except Exception:
         return _search_fallback(query, max_results)
 
 

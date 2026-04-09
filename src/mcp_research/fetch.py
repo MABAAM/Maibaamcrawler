@@ -4,8 +4,10 @@ import hashlib
 import ipaddress
 import json
 import logging
+import os
 import random
 import re
+import tempfile
 import time
 import urllib.parse
 
@@ -53,19 +55,41 @@ def is_safe_url(url: str) -> tuple[bool, str | None]:
     return True, None
 
 
+# ── PDF Extraction ──────────────────────────────────────────────────────────
+
+def _extract_pdf_text(raw_bytes: bytes, url: str) -> tuple[str | None, str]:
+    """Extract text from PDF bytes via PyPDF2. Returns (text, title) or (None, '')."""
+    tmp_path = None
+    try:
+        from PyPDF2 import PdfReader
+        import io
+        reader = PdfReader(io.BytesIO(raw_bytes))
+        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+        title = urllib.parse.urlparse(url).path.split("/")[-1] or "PDF"
+        return text, title
+    except ImportError:
+        # Fallback: write to temp file and try basic text extraction
+        return None, ""
+    except Exception as e:
+        logger.warning(f"PDF extraction failed: {e}")
+        return None, ""
+
+
 # ── Fetch with Retry ─────────────────────────────────────────────────────────
 
 def fetch_with_retry(url: str, timeout: int = config.FETCH_TIMEOUT,
-                     max_retries: int = config.FETCH_MAX_RETRIES):
+                     max_retries: int = config.FETCH_MAX_RETRIES,
+                     session: requests.Session | None = None):
     """GET with exponential backoff on 429/5xx. Manual redirect following with per-hop SSRF.
     Returns (response, error_str)."""
     headers = {"User-Agent": random.choice(config.USER_AGENTS)}
+    _get = session.get if session else requests.get
     last_err = None
     for attempt in range(max_retries):
         try:
             current_url = url
             for _hop in range(10):
-                resp = requests.get(
+                resp = _get(
                     current_url, headers=headers, timeout=timeout,
                     stream=True, allow_redirects=False,
                 )
@@ -81,14 +105,14 @@ def fetch_with_retry(url: str, timeout: int = config.FETCH_TIMEOUT,
             if resp.status_code == 429 or resp.status_code >= 500:
                 last_err = f"HTTP {resp.status_code}"
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep((2 ** attempt) + random.uniform(0, 1))
                     continue
                 return None, f"HTTP {resp.status_code} after {max_retries} retries"
             return resp, None
         except requests.exceptions.Timeout:
             last_err = "timeout"
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
                 continue
             return None, f"Timeout after {max_retries} retries"
         except requests.exceptions.RequestException as e:
@@ -209,10 +233,40 @@ def _read_cache(cache_path: str) -> dict | None:
         return None
 
 
+_last_eviction_ts: float = 0
+
 def _write_cache(cache_path: str, data: dict) -> None:
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+    _maybe_evict_cache()
+
+
+def _maybe_evict_cache() -> None:
+    """Age-based + size-based cache eviction, at most once per 5 minutes."""
+    global _last_eviction_ts
+    now = time.time()
+    if now - _last_eviction_ts < 300:
+        return
+    _last_eviction_ts = now
+    try:
+        cache_dir = config.CACHE_DIR
+        cutoff = now - (config.CACHE_TTL_HOURS * 3600)
+        entries = sorted(cache_dir.iterdir(), key=lambda p: p.stat().st_mtime)
+        total_bytes = 0
+        max_bytes = config.CACHE_MAX_SIZE_MB * 1024 * 1024
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            st = entry.stat()
+            if st.st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+                continue
+            total_bytes += st.st_size
+            if total_bytes > max_bytes:
+                entry.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -232,8 +286,7 @@ def _log_event(query: str, result_count: int, source_tier: str = "fetch",
             "error": str(error)[:200] if error else None,
         }
         if extra:
-            allowed = {"depth", "synthesis_len", "pages_fetched"}
-            rec.update({k: v for k, v in extra.items() if k in allowed})
+            rec.update(extra)
         log_path = config.LOG_DIR / "search_log.ndjson"
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
@@ -260,14 +313,48 @@ def fetch_url(url: str, summarize: bool = False,
             _log_event(url, 1, "cache")
             return cached
 
+    # Get authenticated session from pool
+    try:
+        from .sessions import get_pool
+        session = get_pool().get_session(url)
+    except Exception:
+        session = None
+
     # Fetch
-    resp, fetch_err = fetch_with_retry(url)
+    resp, fetch_err = fetch_with_retry(url, session=session)
     if fetch_err:
         _log_event(url, 0, "fetch", error=fetch_err)
         return {"error": f"Fetch failed: {fetch_err}"}
 
     # Content-type check
     content_type = resp.headers.get("Content-Type", "").lower()
+
+    # PDF extraction (before binary rejection)
+    if "application/pdf" in content_type or url.lower().endswith(".pdf"):
+        pdf_chunks = []
+        pdf_total = 0
+        for chunk in resp.iter_content(8192):
+            pdf_chunks.append(chunk)
+            pdf_total += len(chunk)
+            if pdf_total > config.FETCH_MAX_BYTES:
+                break
+        pdf_raw = b"".join(pdf_chunks)
+        content_md, title = _extract_pdf_text(pdf_raw, url)
+        if content_md is None:
+            return {"error": "PDF extraction failed. Install PyPDF2: pip install 'mcp-research[ingest]'"}
+        content_md = smart_truncate(content_md, max_chars)
+        summary = None
+        if summarize and content_md:
+            from . import ollama
+            summary = ollama.summarize_text(content_md)
+        result = {
+            "url": url, "title": title or "", "content_md": content_md,
+            "content_length": len(content_md), "summary": summary, "from_cache": False,
+        }
+        _write_cache(cache_path, result)
+        _log_event(url, 1, "fetch")
+        return result
+
     if any(ct in content_type for ct in ("image/", "video/", "audio/", "octet-stream")):
         return {"error": f"Binary content ({content_type.split(';')[0]}) — not fetchable as text."}
 
@@ -282,6 +369,7 @@ def fetch_url(url: str, summarize: bool = False,
     raw = b"".join(chunks)
 
     # Convert
+    html_text = ""
     if "application/json" in content_type:
         try:
             json_data = json.loads(raw.decode("utf-8", errors="replace"))
@@ -292,6 +380,21 @@ def fetch_url(url: str, summarize: bool = False,
     else:
         html_text = raw.decode("utf-8", errors="replace")
         content_md, title = html_to_markdown(html_text, base_url=url)
+
+    # CAPTCHA detection (on HTML responses only)
+    captcha_info = {}
+    if "html" in content_type:
+        try:
+            from .captcha import detect_captcha
+            captcha = detect_captcha(resp, html_text)
+            if captcha.detected:
+                captcha_info = {
+                    "captcha_blocked": True,
+                    "captcha_provider": captcha.provider,
+                    "captcha_suggestion": captcha.suggestion,
+                }
+        except Exception:
+            pass
 
     # Truncate
     content_md = smart_truncate(content_md, max_chars)
@@ -309,6 +412,7 @@ def fetch_url(url: str, summarize: bool = False,
         "content_length": len(content_md),
         "summary": summary,
         "from_cache": False,
+        **captcha_info,
     }
 
     # Write cache

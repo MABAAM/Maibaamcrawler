@@ -5,12 +5,17 @@ from mcp_research.server import server
 
 class TestToolRegistration:
 
-    def test_three_tools_registered(self):
+    def test_eight_tools_registered(self):
         tools = list(server._tool_manager._tools.keys())
         assert "web_search" in tools
         assert "fetch_url" in tools
         assert "research" in tools
-        assert len(tools) == 3
+        assert "youtube_essence" in tools
+        assert "deep_ingest" in tools
+        assert "academic_lookup" in tools
+        assert "twitter_extract" in tools
+        assert "vault_status" in tools
+        assert len(tools) == 8
 
 
 class TestSafetyAnnotations:
@@ -38,3 +43,28 @@ class TestToolsAreAsync:
         from mcp_research.server import research
         import asyncio
         assert asyncio.iscoroutinefunction(research)
+
+    def test_youtube_essence_is_coroutine(self):
+        from mcp_research.server import youtube_essence
+        import asyncio
+        assert asyncio.iscoroutinefunction(youtube_essence)
+
+    def test_deep_ingest_is_coroutine(self):
+        from mcp_research.server import deep_ingest
+        import asyncio
+        assert asyncio.iscoroutinefunction(deep_ingest)
+
+    def test_academic_lookup_is_coroutine(self):
+        from mcp_research.server import academic_lookup
+        import asyncio
+        assert asyncio.iscoroutinefunction(academic_lookup)
+
+    def test_twitter_extract_is_coroutine(self):
+        from mcp_research.server import twitter_extract
+        import asyncio
+        assert asyncio.iscoroutinefunction(twitter_extract)
+
+    def test_vault_status_is_coroutine(self):
+        from mcp_research.server import vault_status
+        import asyncio
+        assert asyncio.iscoroutinefunction(vault_status)

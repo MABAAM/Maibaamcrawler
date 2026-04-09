@@ -1,23 +1,35 @@
-"""FastMCP server exposing 3 research tools: web_search, fetch_url, research."""
+"""FastMCP server exposing 8 research tools: web_search, fetch_url, research, youtube_essence, deep_ingest, academic_lookup, twitter_extract, vault_status."""
 
 import asyncio
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from . import config, ollama, search as search_mod, fetch as fetch_mod
+from . import youtube as youtube_mod, ingest as ingest_mod
+from . import academic as academic_mod, twitter as twitter_mod
 
 logger = logging.getLogger(__name__)
 
 server = FastMCP("mcp-research")
+
+_CONCURRENCY = asyncio.Semaphore(config.MAX_CONCURRENCY)
 
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
     idempotentHint=True,
     openWorldHint=True,
+)
+
+_LOCAL_READ = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
 )
 
 
@@ -97,6 +109,9 @@ async def fetch_url(url: str, summarize: bool = False,
     lines.append(f"**Length:** {result.get('content_length', 0)} chars")
     if result.get("from_cache"):
         lines.append("*(from cache)*")
+    if result.get("captcha_blocked"):
+        lines.append(f"\n**CAPTCHA Detected:** {result.get('captcha_provider', 'unknown')}")
+        lines.append(f"*{result.get('captcha_suggestion', '')}*")
     lines.append("")
     if result.get("summary"):
         lines.append("### Summary\n")
@@ -196,15 +211,20 @@ async def research(query: str, depth: str = "standard",
     if hint:
         lines.append(f"*{hint}*\n")
 
+    captcha_blocked = [p for p in fetched_pages if p.get("captcha_blocked")]
     lines.append(f"### Sources ({len(fetched_pages)} pages fetched)\n")
     for i, page in enumerate(fetched_pages, 1):
         title = page.get("title", "Untitled")
         url = page.get("url", "")
         summary = page.get("summary", "")
         lines.append(f"**[{i}] [{title}]({url})**")
+        if page.get("captcha_blocked"):
+            lines.append(f"*CAPTCHA blocked ({page.get('captcha_provider', 'unknown')}) — content may be incomplete*")
         if summary:
             lines.append(summary)
         lines.append("")
+    if captcha_blocked:
+        lines.append(f"*{len(captcha_blocked)} source(s) were CAPTCHA-blocked. Configure vault credentials for better access.*\n")
 
     if synthesis:
         lines.append("### Synthesis\n")
@@ -216,5 +236,274 @@ async def research(query: str, depth: str = "standard",
         lines.append("### Search Results\n")
         for i, r in enumerate(results, 1):
             lines.append(f"{i}. [{r['title']}]({r['url']}) — {r.get('snippet', '')}")
+
+    return "\n".join(lines)
+
+
+@server.tool(annotations=_READ_ONLY)
+async def youtube_essence(url: str, mode: str = "standard") -> str:
+    """Extract essence from a YouTube video: transcript, summary, key points, chapters, quotes.
+
+    Args:
+        url: YouTube URL (youtube.com/watch?v=, youtu.be/, youtube.com/shorts/).
+        mode: Extraction depth — "quick" (TL;DR), "standard" (+ chapters), or "deep" (+ quotes).
+    """
+    async with _CONCURRENCY:
+        result = await asyncio.to_thread(youtube_mod.youtube_essence, url, mode)
+
+    if "error" in result:
+        return f"**Error:** {result['error']}"
+
+    lines = [f"## {result.get('title', 'YouTube Video')}"]
+    lines.append(f"**URL:** {result['url']}")
+    lines.append(f"**Duration:** {result.get('duration', '?')} | **Mode:** {mode}")
+    if result.get("from_cache"):
+        lines.append("*(from cache)*")
+    lines.append("")
+
+    if result.get("summary"):
+        lines.append("### Summary\n")
+        lines.append(result["summary"])
+        lines.append("")
+
+    if result.get("key_points"):
+        lines.append("### Key Points\n")
+        for kp in result["key_points"]:
+            lines.append(f"- {kp}")
+        lines.append("")
+
+    if result.get("chapters"):
+        lines.append("### Chapters\n")
+        for ch in result["chapters"]:
+            lines.append(f"- [{ch['time']}] {ch['title']}")
+        lines.append("")
+
+    if result.get("quotes"):
+        lines.append("### Notable Quotes\n")
+        for q in result["quotes"]:
+            lines.append(f"> {q}")
+        lines.append("")
+
+    if result.get("transcript_excerpt"):
+        lines.append("### Transcript Excerpt\n")
+        lines.append(result["transcript_excerpt"])
+
+    src = result.get("transcription_source")
+    if src:
+        lines.append(f"\n*Transcription: {src} ({result.get('transcript_length', 0)} chars)*")
+
+    return "\n".join(lines)
+
+
+@server.tool(annotations=_LOCAL_READ)
+async def deep_ingest(path: str, include_types: str = "",
+                      max_files: int = 200, summarize: bool = False) -> str:
+    """Extract text from files in a directory or single file. Supports text, PDF, DOCX, XLSX, PPTX, audio, video, images.
+
+    Args:
+        path: Directory or file path to process.
+        include_types: Comma-separated type filter (text,pdf,audio,video,image,office). Empty = all.
+        max_files: Maximum files to process (1-5000).
+        summarize: If true, generate an AI summary of the combined content.
+    """
+    max_files = min(max(1, max_files), 5000)
+
+    async with _CONCURRENCY:
+        result = await asyncio.to_thread(
+            ingest_mod.deep_ingest, path,
+            include_types=include_types, max_files=max_files,
+            summarize=summarize,
+        )
+
+    if "error" in result:
+        return f"**Error:** {result['error']}"
+
+    lines = [f"## Deep Ingest: {os.path.basename(path)}"]
+    lines.append(f"**Processed:** {result['files_processed']} | **Skipped:** {result['files_skipped']}")
+    lines.append("")
+
+    if result.get("by_type"):
+        lines.append("### By Type\n")
+        for ftype, counts in result["by_type"].items():
+            lines.append(f"- **{ftype}**: {counts['ok']} extracted, {counts.get('skip', 0)} skipped")
+        lines.append("")
+
+    if result.get("summary"):
+        lines.append("### Summary\n")
+        lines.append(result["summary"])
+        lines.append("")
+
+    if result.get("content"):
+        lines.append(f"### Extracted Content ({len(result['content'])} files)\n")
+        for c in result["content"][:20]:
+            lines.append(f"**{c['file']}** ({c['type']}, {c['chars']} chars)")
+            excerpt = c.get("text", "")[:500]
+            if excerpt:
+                lines.append(excerpt)
+            lines.append("")
+
+    if result.get("errors"):
+        lines.append(f"### Errors ({len(result['errors'])})\n")
+        for err in result["errors"][:10]:
+            lines.append(f"- {err}")
+
+    return "\n".join(lines)
+
+
+@server.tool(annotations=_READ_ONLY)
+async def academic_lookup(identifier: str, fetch_fulltext: bool = True) -> str:
+    """Resolve a DOI, ArXiv ID, or PubMed ID. Fetch paper via institutional access if configured in vault.
+
+    Args:
+        identifier: DOI (10.xxxx/...), ArXiv ID (2301.12345), PubMed ID (12345678), or publisher URL.
+        fetch_fulltext: Attempt to fetch the full paper text via vault credentials / EZproxy.
+    """
+    async with _CONCURRENCY:
+        result = await asyncio.to_thread(academic_mod.academic_lookup, identifier, fetch_fulltext)
+
+    if "error" in result:
+        hint = result.get("hint", "")
+        return f"**Error:** {result['error']}\n{hint}" if hint else f"**Error:** {result['error']}"
+
+    lines = [f"## {result.get('title', 'Academic Paper')}"]
+
+    if result.get("doi"):
+        lines.append(f"**DOI:** {result['doi']}")
+    if result.get("arxiv_id"):
+        lines.append(f"**ArXiv:** {result['arxiv_id']}")
+    if result.get("pmid"):
+        lines.append(f"**PubMed:** {result['pmid']}")
+
+    if result.get("authors"):
+        lines.append(f"**Authors:** {', '.join(result['authors'][:10])}")
+    if result.get("journal"):
+        lines.append(f"**Journal:** {result['journal']}")
+    if result.get("year"):
+        lines.append(f"**Year:** {result['year']}")
+    if result.get("publisher_name") or result.get("publisher"):
+        lines.append(f"**Publisher:** {result.get('publisher_name') or result.get('publisher', '')}")
+    if result.get("access_method"):
+        lines.append(f"**Access:** {result['access_method']}")
+    if result.get("pdf_url"):
+        lines.append(f"**PDF:** {result['pdf_url']}")
+
+    if result.get("access_error"):
+        lines.append(f"\n*{result['access_error']}*")
+
+    lines.append("")
+
+    if result.get("abstract"):
+        lines.append("### Abstract\n")
+        lines.append(result["abstract"])
+        lines.append("")
+
+    if result.get("full_text_md"):
+        lines.append("### Full Text\n")
+        lines.append(result["full_text_md"])
+
+    if result.get("note"):
+        lines.append(f"\n*{result['note']}*")
+
+    return "\n".join(lines)
+
+
+@server.tool(annotations=_READ_ONLY)
+async def twitter_extract(url: str, include_thread: bool = False) -> str:
+    """Extract tweet or thread from X.com/Twitter. Supports yt-dlp, API, and cookie-based access.
+
+    Args:
+        url: Tweet URL (x.com/user/status/id or twitter.com/user/status/id).
+        include_thread: If true, fetch the full conversation thread.
+    """
+    async with _CONCURRENCY:
+        if include_thread:
+            result = await asyncio.to_thread(twitter_mod.extract_thread, url)
+        else:
+            result = await asyncio.to_thread(twitter_mod.extract_tweet, url)
+
+    if "error" in result:
+        hints = result.get("hints", [])
+        msg = f"**Error:** {result['error']}"
+        if hints:
+            msg += "\n" + "\n".join(f"- {h}" for h in hints)
+        return msg
+
+    # Thread format
+    if "thread" in result:
+        lines = [f"## Thread from {result.get('url', url)}"]
+        if result.get("note"):
+            lines.append(f"*{result['note']}*")
+        lines.append("")
+        for i, tweet in enumerate(result["thread"], 1):
+            author = tweet.get("author", "")
+            text = tweet.get("text", "")
+            ts = tweet.get("timestamp", "")
+            lines.append(f"**[{i}]** {f'@{author} ' if author else ''}{f'({ts})' if ts else ''}")
+            lines.append(text)
+            lines.append("")
+        return "\n".join(lines)
+
+    # Single tweet format
+    lines = [f"## Tweet by @{result.get('author_id') or result.get('author', 'unknown')}"]
+    if result.get("author") and result.get("author") != result.get("author_id"):
+        lines.append(f"**{result['author']}**")
+    lines.append(f"**URL:** {result.get('url', url)}")
+    if result.get("timestamp") or result.get("upload_date"):
+        lines.append(f"**Date:** {result.get('timestamp') or result.get('upload_date', '')}")
+    if result.get("access_method"):
+        lines.append(f"**Via:** {result['access_method']}")
+    lines.append("")
+
+    lines.append(result.get("text", ""))
+    lines.append("")
+
+    metrics = result.get("metrics", {})
+    metric_parts = []
+    for key in ("likes", "retweets", "replies", "views", "comments"):
+        val = metrics.get(key)
+        if val is not None:
+            metric_parts.append(f"{key}: {val:,}" if isinstance(val, int) else f"{key}: {val}")
+    if metric_parts:
+        lines.append(f"*{' | '.join(metric_parts)}*")
+
+    if result.get("media_urls"):
+        lines.append("\n### Media")
+        for mu in result["media_urls"][:5]:
+            lines.append(f"- {mu}")
+
+    return "\n".join(lines)
+
+
+@server.tool(annotations=_LOCAL_READ)
+async def vault_status() -> str:
+    """Show credential vault status: loaded profiles, match patterns, auth types. Never exposes secrets."""
+    from .vault import get_vault
+
+    profiles = get_vault()
+
+    if not profiles:
+        vault_path = str(config.VAULT_FILE)
+        return (
+            f"## Vault Status\n\n"
+            f"No profiles loaded.\n\n"
+            f"**Vault file:** `{vault_path}`\n"
+            f"**Exists:** {config.VAULT_FILE.exists()}\n"
+            f"**Hot reload:** {config.VAULT_HOT_RELOAD}\n\n"
+            f"Create `{vault_path}` to configure authentication for protected sources.\n"
+            f"See documentation for vault.yaml format."
+        )
+
+    lines = ["## Vault Status\n"]
+    lines.append(f"**Profiles loaded:** {len(profiles)}")
+    lines.append(f"**Vault file:** `{config.VAULT_FILE}`")
+    lines.append(f"**Hot reload:** {config.VAULT_HOT_RELOAD}")
+    lines.append("")
+    lines.append("### Profiles\n")
+    lines.append("| Profile | Match Pattern | Auth Type | EZProxy |")
+    lines.append("|---------|--------------|-----------|---------|")
+    for name, profile in profiles.items():
+        auth_type = profile.auth.type if profile.auth else "-"
+        ezproxy = profile.ezproxy.mode if profile.ezproxy else "-"
+        lines.append(f"| {name} | `{profile.match}` | {auth_type} | {ezproxy} |")
 
     return "\n".join(lines)

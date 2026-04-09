@@ -1,3 +1,3 @@
-"""mcp-research: Web research MCP server with search, fetch, and compound research tools."""
+"""mcp-research: Web research MCP server with search, fetch, academic, twitter, and compound research tools."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
