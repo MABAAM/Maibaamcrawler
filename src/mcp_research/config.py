@@ -46,7 +46,10 @@ USER_AGENTS = [
 FETCH_TIMEOUT = 15
 FETCH_MAX_RETRIES = 3
 FETCH_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-FETCH_MD_MAX_CHARS = 50_000        # ~12K tokens
+FETCH_MD_MAX_CHARS = 50_000        # hard ceiling — tools use lower defaults
+FETCH_DEFAULT_CHARS = 15_000       # ~4K tokens — default for fetch_url
+RESEARCH_PER_SOURCE_CHARS = 2_000  # ~500 tokens — per source in research tool
+ACADEMIC_FULLTEXT_CHARS = 10_000   # ~2.5K tokens — academic full text cap
 
 # ── Ensure dirs exist (owner-only permissions) ──────────────────────────────
 for _d in (CACHE_DIR, LOG_DIR, YOUTUBE_CACHE_DIR):

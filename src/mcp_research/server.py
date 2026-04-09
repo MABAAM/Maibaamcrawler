@@ -90,14 +90,16 @@ async def web_search(query: str, max_results: int = 5,
 
 @server.tool(annotations=_READ_ONLY)
 async def fetch_url(url: str, summarize: bool = False,
-                    max_chars: int = 50000) -> str:
+                    max_chars: int = 0) -> str:
     """Fetch a URL, convert to markdown. SSRF-protected and cached.
 
     Args:
         url: The URL to fetch.
         summarize: If true and Ollama is available, include a summary.
-        max_chars: Maximum characters of content to return.
+        max_chars: Maximum content chars (default ~15K/4K tokens). Set higher for full pages.
     """
+    if max_chars <= 0:
+        max_chars = config.FETCH_DEFAULT_CHARS
     max_chars = min(max(100, max_chars), config.FETCH_MD_MAX_CHARS)
     result = await asyncio.to_thread(fetch_mod.fetch_url, url, summarize, max_chars)
 
@@ -213,15 +215,17 @@ async def research(query: str, depth: str = "standard",
 
     captcha_blocked = [p for p in fetched_pages if p.get("captcha_blocked")]
     lines.append(f"### Sources ({len(fetched_pages)} pages fetched)\n")
+    per_source_cap = config.RESEARCH_PER_SOURCE_CHARS
     for i, page in enumerate(fetched_pages, 1):
         title = page.get("title", "Untitled")
         url = page.get("url", "")
-        summary = page.get("summary", "")
+        # Prefer summary over raw content for token efficiency
+        summary = page.get("summary") or page.get("content_md", "")[:per_source_cap]
         lines.append(f"**[{i}] [{title}]({url})**")
         if page.get("captcha_blocked"):
             lines.append(f"*CAPTCHA blocked ({page.get('captcha_provider', 'unknown')}) — content may be incomplete*")
         if summary:
-            lines.append(summary)
+            lines.append(summary[:per_source_cap])
         lines.append("")
     if captcha_blocked:
         lines.append(f"*{len(captcha_blocked)} source(s) were CAPTCHA-blocked. Configure vault credentials for better access.*\n")
@@ -285,8 +289,13 @@ async def youtube_essence(url: str, mode: str = "standard") -> str:
         lines.append("")
 
     if result.get("transcript_excerpt"):
+        excerpt = result["transcript_excerpt"]
         lines.append("### Transcript Excerpt\n")
-        lines.append(result["transcript_excerpt"])
+        if len(excerpt) > 3000:
+            lines.append(excerpt[:3000])
+            lines.append("\n*[... transcript truncated]*")
+        else:
+            lines.append(excerpt)
 
     src = result.get("transcription_source")
     if src:
@@ -334,13 +343,17 @@ async def deep_ingest(path: str, include_types: str = "",
         lines.append("")
 
     if result.get("content"):
-        lines.append(f"### Extracted Content ({len(result['content'])} files)\n")
-        for c in result["content"][:20]:
+        file_count = len(result["content"])
+        shown = min(file_count, 15)
+        lines.append(f"### Extracted Content ({file_count} files, showing {shown})\n")
+        for c in result["content"][:shown]:
             lines.append(f"**{c['file']}** ({c['type']}, {c['chars']} chars)")
-            excerpt = c.get("text", "")[:500]
+            excerpt = c.get("text", "")[:300]
             if excerpt:
                 lines.append(excerpt)
             lines.append("")
+        if file_count > shown:
+            lines.append(f"*... and {file_count - shown} more files*")
 
     if result.get("errors"):
         lines.append(f"### Errors ({len(result['errors'])})\n")
@@ -398,8 +411,14 @@ async def academic_lookup(identifier: str, fetch_fulltext: bool = True) -> str:
         lines.append("")
 
     if result.get("full_text_md"):
+        full_text = result["full_text_md"]
+        cap = config.ACADEMIC_FULLTEXT_CHARS
         lines.append("### Full Text\n")
-        lines.append(result["full_text_md"])
+        if len(full_text) > cap:
+            lines.append(full_text[:cap])
+            lines.append(f"\n*[... truncated at {cap:,} chars — request with higher max_chars for full text]*")
+        else:
+            lines.append(full_text)
 
     if result.get("note"):
         lines.append(f"\n*{result['note']}*")
