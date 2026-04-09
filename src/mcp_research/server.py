@@ -476,34 +476,53 @@ async def twitter_extract(url: str, include_thread: bool = False) -> str:
 
 @server.tool(annotations=_LOCAL_READ)
 async def vault_status() -> str:
-    """Show credential vault status: loaded profiles, match patterns, auth types. Never exposes secrets."""
+    """Show credential vault status, loaded profiles, and optional dependency availability. Never exposes secrets."""
+    import shutil
     from .vault import get_vault
 
     profiles = get_vault()
+    lines = ["## Vault Status\n"]
 
     if not profiles:
         vault_path = str(config.VAULT_FILE)
-        return (
-            f"## Vault Status\n\n"
-            f"No profiles loaded.\n\n"
-            f"**Vault file:** `{vault_path}`\n"
-            f"**Exists:** {config.VAULT_FILE.exists()}\n"
-            f"**Hot reload:** {config.VAULT_HOT_RELOAD}\n\n"
-            f"Create `{vault_path}` to configure authentication for protected sources.\n"
-            f"See documentation for vault.yaml format."
-        )
+        lines.append("No profiles loaded.\n")
+        lines.append(f"**Vault file:** `{vault_path}`")
+        lines.append(f"**Exists:** {config.VAULT_FILE.exists()}")
+        lines.append(f"**Hot reload:** {config.VAULT_HOT_RELOAD}\n")
+        lines.append(f"Create `{vault_path}` to configure authentication for protected sources.")
+    else:
+        lines.append(f"**Profiles loaded:** {len(profiles)}")
+        lines.append(f"**Vault file:** `{config.VAULT_FILE}`")
+        lines.append(f"**Hot reload:** {config.VAULT_HOT_RELOAD}")
+        lines.append("")
+        lines.append("### Profiles\n")
+        lines.append("| Profile | Match Pattern | Auth Type | EZProxy |")
+        lines.append("|---------|--------------|-----------|---------|")
+        for name, profile in profiles.items():
+            auth_type = profile.auth.type if profile.auth else "-"
+            ezproxy = profile.ezproxy.mode if profile.ezproxy else "-"
+            lines.append(f"| {name} | `{profile.match}` | {auth_type} | {ezproxy} |")
 
-    lines = ["## Vault Status\n"]
-    lines.append(f"**Profiles loaded:** {len(profiles)}")
-    lines.append(f"**Vault file:** `{config.VAULT_FILE}`")
-    lines.append(f"**Hot reload:** {config.VAULT_HOT_RELOAD}")
-    lines.append("")
-    lines.append("### Profiles\n")
-    lines.append("| Profile | Match Pattern | Auth Type | EZProxy |")
-    lines.append("|---------|--------------|-----------|---------|")
-    for name, profile in profiles.items():
-        auth_type = profile.auth.type if profile.auth else "-"
-        ezproxy = profile.ezproxy.mode if profile.ezproxy else "-"
-        lines.append(f"| {name} | `{profile.match}` | {auth_type} | {ezproxy} |")
+    # Dependency check
+    lines.append("\n### Optional Dependencies\n")
+    deps = [
+        ("yt-dlp", lambda: shutil.which("yt-dlp") is not None, "twitter, youtube"),
+        ("PyPDF2", lambda: __import__("PyPDF2") or True, "academic, ingest"),
+        ("python-docx", lambda: __import__("docx") or True, "ingest"),
+        ("openpyxl", lambda: __import__("openpyxl") or True, "ingest"),
+        ("python-pptx", lambda: __import__("pptx") or True, "ingest"),
+        ("faster-whisper", lambda: __import__("faster_whisper") or True, "youtube, ingest"),
+        ("ffmpeg", lambda: shutil.which("ffmpeg") is not None, "video extraction"),
+        ("ollama", lambda: shutil.which("ollama") is not None, "summarization"),
+    ]
+    for name, check, used_by in deps:
+        try:
+            ok = check()
+        except Exception:
+            ok = False
+        status = "installed" if ok else "**missing**"
+        lines.append(f"- **{name}**: {status} *(used by: {used_by})*")
+
+    lines.append(f"\nInstall all: `pip install 'mcp-research[all]'`")
 
     return "\n".join(lines)

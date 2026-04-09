@@ -47,6 +47,9 @@ def main():
     # vault
     sub.add_parser("vault", help="Show vault status and loaded profiles")
 
+    # doctor
+    sub.add_parser("doctor", help="Check dependencies and configuration")
+
     args = parser.parse_args()
 
     if args.command is None or args.command == "serve":
@@ -185,6 +188,100 @@ def main():
                 auth_type = p.auth.type if p.auth else "-"
                 ezproxy = p.ezproxy.mode if p.ezproxy else "-"
                 print(f"  {name:20s}  match={p.match:30s}  auth={auth_type:12s}  ezproxy={ezproxy}")
+
+    elif args.command == "doctor":
+        _run_doctor()
+
+
+def _run_doctor():
+    """Check all dependencies and configuration, report status."""
+    import shutil
+    from . import config
+
+    print("mcp-research doctor\n" + "=" * 40)
+
+    # Core dependencies (always available if installed)
+    print("\n[Core]")
+    _check_import("requests", "requests")
+    _check_import("beautifulsoup4", "bs4")
+    _check_import("duckduckgo-search", "duckduckgo_search", alt="ddgs")
+    _check_import("pyyaml", "yaml")
+
+    # Optional: Twitter / YouTube
+    print("\n[Twitter & YouTube]")
+    ytdlp_path = shutil.which("yt-dlp")
+    if ytdlp_path:
+        print(f"  yt-dlp           OK  ({ytdlp_path})")
+    else:
+        print(f"  yt-dlp           MISSING  pip install 'mcp-research[twitter]'")
+
+    # Optional: Academic / Ingest
+    print("\n[Academic & Ingest]")
+    _check_import("PyPDF2", "PyPDF2", install="pip install 'mcp-research[academic]'")
+    _check_import("python-docx", "docx", install="pip install 'mcp-research[ingest]'")
+    _check_import("openpyxl", "openpyxl", install="pip install 'mcp-research[ingest]'")
+    _check_import("python-pptx", "pptx", install="pip install 'mcp-research[ingest]'")
+    _check_import("faster-whisper", "faster_whisper", install="pip install 'mcp-research[youtube]'")
+
+    # External tools
+    print("\n[External Tools]")
+    for tool in ("ffmpeg", "ollama"):
+        path = shutil.which(tool)
+        if path:
+            print(f"  {tool:18s} OK  ({path})")
+        else:
+            print(f"  {tool:18s} MISSING  (optional)")
+
+    # Ollama config
+    print("\n[Ollama Config]")
+    print(f"  URL:             {config.OLLAMA_URL or '(not set)'}")
+    print(f"  Model:           {config.OLLAMA_MODEL or '(not set)'}")
+    print(f"  Vision model:    {config.OLLAMA_VISION_MODEL or '(not set)'}")
+
+    # Vault
+    print("\n[Vault]")
+    print(f"  File:            {config.VAULT_FILE}")
+    print(f"  Exists:          {config.VAULT_FILE.exists()}")
+    print(f"  Hot reload:      {config.VAULT_HOT_RELOAD}")
+    try:
+        from .vault import get_vault
+        profiles = get_vault()
+        print(f"  Profiles loaded: {len(profiles)}")
+        for name in profiles:
+            print(f"    - {name}")
+    except Exception as e:
+        print(f"  Load error:      {e}")
+
+    # Brave API
+    print("\n[Search]")
+    if config.BRAVE_API_KEY:
+        print(f"  Brave API key:   configured ({config.BRAVE_API_KEY[:8]}...)")
+    else:
+        print(f"  Brave API key:   (not set, will use DuckDuckGo)")
+
+    # Quick install hint
+    print("\n" + "-" * 40)
+    print("Install everything:  pip install 'mcp-research[all]'")
+
+
+def _check_import(package_name: str, module_name: str, alt: str = "", install: str = ""):
+    """Try to import a module, report status."""
+    try:
+        __import__(module_name)
+        print(f"  {package_name:18s} OK")
+        return True
+    except ImportError:
+        pass
+    if alt:
+        try:
+            __import__(alt)
+            print(f"  {package_name:18s} OK  (via {alt})")
+            return True
+        except ImportError:
+            pass
+    hint = install or f"pip install {package_name}"
+    print(f"  {package_name:18s} MISSING  {hint}")
+    return False
 
 
 if __name__ == "__main__":
