@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-research"
-version = "0.1.0"
-description = "Web research MCP server: search, fetch, and compound research tools"
+version = "0.3.0"
+description = "Web research MCP server: search, fetch, academic, twitter, and compound research tools"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -28,7 +28,15 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "duckduckgo-search>=4.0",
     "certifi",
+    "pyyaml>=6.0",
 ]
+
+[project.optional-dependencies]
+youtube = ["yt-dlp>=2024.0", "faster-whisper>=1.0"]
+twitter = ["yt-dlp>=2024.0"]
+academic = ["PyPDF2>=3.0"]
+ingest = ["PyPDF2>=3.0", "python-docx>=1.0", "openpyxl>=3.1", "python-pptx>=0.6", "faster-whisper>=1.0"]
+all = ["mcp-research[youtube]", "mcp-research[ingest]", "mcp-research[twitter]", "mcp-research[academic]"]
 
 [project.urls]
 Homepage = "https://maibaam.com"
@@ -36,7 +44,7 @@ Repository = "https://github.com/MABAAM/Maibaamcrawler"
 Issues = "https://github.com/MABAAM/Maibaamcrawler/issues"
 
 [project.scripts]
-mcp-research = "mcp_research.__main__:main"
+mcp-research = "mcp_research.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_research"]
